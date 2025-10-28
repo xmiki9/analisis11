@@ -18,6 +18,7 @@ from datetime import datetime
 import textwrap
 import openseespy.opensees as ops
 import math
+import multiprocessing as mp
 
 # Constantes de maquetación A4 con márgenes específicos
 CM_TO_INCH = 1.0 / 2.54
@@ -1375,6 +1376,107 @@ load_combinations = {
     '0.9CM-CSy': {'D': 0.90, 'E_Y_NEG': 1.00},
 }
 
+
+def _assemble_combination_worker(args):
+    combo, factors, case_results = args
+    beam_data = {}
+    for ele in beam_tags:
+        Vi = Vj = Mi = Mj = 0.0
+        for case, coef in factors.items():
+            blk = case_results[case]['beams'][ele]
+            Vi += coef * blk['Vi']
+            Vj += coef * blk['Vj']
+            Mi += coef * blk['Mi']
+            Mj += coef * blk['Mj']
+        beam_data[ele] = {
+            'Vi': Vi,
+            'Vj': Vj,
+            'Mi': Mi,
+            'Mj': Mj
+        }
+
+    column_data = {}
+    for (ele, _, _, _) in columns_by_level:
+        Pi = Pj = Myi = Myj = Mzi = Mzj = 0.0
+        Vyi = Vyj = Vzi = Vzj = 0.0
+        for case, coef in factors.items():
+            blk = case_results[case]['columns'][ele]
+            Pi += coef * blk['Pi']
+            Pj += coef * blk['Pj']
+            Myi += coef * blk['Myi']
+            Myj += coef * blk['Myj']
+            Mzi += coef * blk['Mzi']
+            Mzj += coef * blk['Mzj']
+            Vyi += coef * blk['Vyi']
+            Vyj += coef * blk['Vyj']
+            Vzi += coef * blk['Vzi']
+            Vzj += coef * blk['Vzj']
+        column_data[ele] = {
+            'Pi': Pi,
+            'Pj': Pj,
+            'Myi': Myi,
+            'Myj': Myj,
+            'Mzi': Mzi,
+            'Mzj': Mzj,
+            'Vyi': Vyi,
+            'Vyj': Vyj,
+            'Vzi': Vzi,
+            'Vzj': Vzj
+        }
+
+    displacement_data = {}
+    for iz in floor_master:
+        ux = uy = rz = 0.0
+        for case, coef in factors.items():
+            disp = case_results[case]['displacements'][iz]
+            ux += coef * disp[0]
+            uy += coef * disp[1]
+            rz += coef * disp[2]
+        displacement_data[iz] = (ux, uy, rz)
+
+    return combo, {
+        'beams': beam_data,
+        'columns': column_data,
+        'displacements': displacement_data
+    }
+
+
+def compute_combination_responses(load_combinations, case_results, processes=None):
+    combos = list(load_combinations.items())
+    if not combos:
+        return {}
+
+    tasks = [(combo, factors, case_results) for combo, factors in combos]
+    results = {}
+
+    try:
+        ctx = mp.get_context('fork')
+    except (AttributeError, ValueError):
+        ctx = None
+
+    try:
+        available = mp.cpu_count()
+    except NotImplementedError:
+        available = 1
+
+    workers = processes or available or 1
+    workers = max(1, min(len(tasks), workers))
+
+    if ctx is None or workers <= 1:
+        for task in tasks:
+            combo, data = _assemble_combination_worker(task)
+            results[combo] = data
+        return results
+
+    with ctx.Pool(processes=workers) as pool:
+        for combo, data in pool.imap_unordered(_assemble_combination_worker, tasks):
+            results[combo] = data
+
+    return results
+
+
+combination_responses = compute_combination_responses(load_combinations, case_results)
+
 beam_envelopes = {}
 for ele in beam_tags:
     L = beam_lengths[ele]
@@ -1383,15 +1485,12 @@ for ele in beam_tags:
     V_neg = np.full_like(x, np.inf)
     M_pos = np.full_like(x, -np.inf)
     M_neg = np.full_like(x, np.inf)
-    for combo, factors in load_combinations.items():
-        Vi = Vj = Mi = Mj = 0.0
-        for case, coef in factors.items():
-            data = case_results[case]
-            blk = data['beams'][ele]
-            Vi += coef * blk['Vi']
-            Vj += coef * blk['Vj']
-            Mi += coef * blk['Mi']
-            Mj += coef * blk['Mj']
+    for combo in load_combinations:
+        combo_data = combination_responses[combo]['beams'][ele]
+        Vi = combo_data['Vi']
+        Vj = combo_data['Vj']
+        Mi = combo_data['Mi']
+        Mj = combo_data['Mj']
         x_local, M_curve = hermite_moment_diagram(L, Mi, Mj, Vi, Vj)
         V_curve = np.gradient(M_curve, x_local, edge_order=2) if L > 0 else np.zeros_like(M_curve)
         V_pos = np.maximum(V_pos, V_curve)
@@ -1577,19 +1676,16 @@ for (ele, ix, iy, iz) in columns_by_level:
     Vy_neg = np.full_like(z, np.inf)
     Vz_pos = np.full_like(z, -np.inf)
     Vz_neg = np.full_like(z, np.inf)
-    for combo, factors in load_combinations.items():
-        Myi = Myj = Mzi = Mzj = 0.0
-        Vyi = Vyj = Vzi = Vzj = 0.0
-        for case, coef in factors.items():
-            blk = case_results[case]['columns'][ele]
-            Myi += coef * blk['Myi']
-            Myj += coef * blk['Myj']
-            Mzi += coef * blk['Mzi']
-            Mzj += coef * blk['Mzj']
-            Vyi += coef * blk['Vyi']
-            Vyj += coef * blk['Vyj']
-            Vzi += coef * blk['Vzi']
-            Vzj += coef * blk['Vzj']
+    for combo in load_combinations:
+        combo_data = combination_responses[combo]['columns'][ele]
+        Myi = combo_data['Myi']
+        Myj = combo_data['Myj']
+        Mzi = combo_data['Mzi']
+        Mzj = combo_data['Mzj']
+        Vyi = combo_data['Vyi']
+        Vyj = combo_data['Vyj']
+        Vzi = combo_data['Vzi']
+        Vzj = combo_data['Vzj']
         if L > 0:
             My_curve = Myi + (Myj - Myi) * (z / L)
             Mz_curve = Mzi + (Mzj - Mzi) * (z / L)
@@ -1635,21 +1731,18 @@ for (ele, ix, iy, iz) in columns_by_level:
             'z_top': Z[iz]
         }
     }
-    for combo, factors in load_combinations.items():
-        Pi = Pj = Myi = Myj = Mzi = Mzj = 0.0
-        Vyi = Vyj = Vzi = Vzj = 0.0
-        for case, coef in factors.items():
-            blk = case_results[case]['columns'][ele]
-            Pi += coef * blk['Pi']
-            Pj += coef * blk['Pj']
-            Myi += coef * blk['Myi']
-            Myj += coef * blk['Myj']
-            Mzi += coef * blk['Mzi']
-            Mzj += coef * blk['Mzj']
-            Vyi += coef * blk['Vyi']
-            Vyj += coef * blk['Vyj']
-            Vzi += coef * blk['Vzi']
-            Vzj += coef * blk['Vzj']
+    for combo in load_combinations:
+        combo_data = combination_responses[combo]['columns'][ele]
+        Pi = combo_data['Pi']
+        Pj = combo_data['Pj']
+        Myi = combo_data['Myi']
+        Myj = combo_data['Myj']
+        Mzi = combo_data['Mzi']
+        Mzj = combo_data['Mzj']
+        Vyi = combo_data['Vyi']
+        Vyj = combo_data['Vyj']
+        Vzi = combo_data['Vzi']
+        Vzj = combo_data['Vzj']
         Pu = 0.5 * (Pi + Pj)
         column_combo_forces[ele]['i'][combo] = {
             'Pu': Pu,
@@ -2418,16 +2511,10 @@ for (ele, ix, iy, iz) in columns_sorted_by_ratio:
 drift_envelope = {iz: {'X_max': -np.inf, 'X_min': np.inf,
                        'Y_max': -np.inf, 'Y_min': np.inf}
                   for iz in floor_master}
-for combo, factors in load_combinations.items():
-    combo_disp = {}
-    for iz, node in floor_master.items():
-        ux = uy = rz = 0.0
-        for case, coef in factors.items():
-            disp = case_results[case]['displacements'][iz]
-            ux += coef * disp[0]
-            uy += coef * disp[1]
-            rz += coef * disp[2]
-        combo_disp[iz] = (ux, uy, rz)
+for combo in load_combinations:
+    combo_disp = combination_responses[combo]['displacements']
+    for iz in floor_master:
+        ux, uy, rz = combo_disp.get(iz, (0.0, 0.0, 0.0))
         env = displacement_envelope[iz]
         env['UX_max'] = max(env['UX_max'], ux)
         env['UX_min'] = min(env['UX_min'], ux)
