@@ -249,6 +249,7 @@ REBAR_DIAMETER_LABELS = [
     (0.015875, '5/8"'),
     (0.01905, '3/4"'),
     (0.0254, '1"'),
+    (0.0381, '1 1/2"'),
 ]
 
 BEAM_BASE_MIN = 0.30
@@ -1983,7 +1984,7 @@ def bresler_boundary(Pu, curve_y, curve_z, phiPn0, npts=361):
     ys = cap_z * np.power(base, 1.0 / alpha)
     return xs, ys, alpha
 
-COLUMN_BAR_DIAMETER_OPTIONS = [0.0127, 0.015875, 0.01905]
+COLUMN_BAR_DIAMETER_OPTIONS = [0.0127, 0.015875, 0.01905, 0.0381]
 COLUMN_BAR_COUNT_OPTIONS = [8, 12, 16, 20, 24, 28, 32, 36, 40]
 COLUMN_SECTION_INCREMENT = 0.05
 COLUMN_SECTION_MAX_STEPS = 20
